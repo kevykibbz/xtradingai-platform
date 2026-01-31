@@ -4,9 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Info, Minus, Plus, Calendar as CalendarIcon, ChevronUp, ChevronDown, Target, X, Loader2, BarChart3, ChevronLeft, ChevronRight, ArrowRight, TrendingUp, TrendingDown, ChevronRight as ChevronRightIcon } from 'lucide-react';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Slider } from '@/components/ui/slider';
+import { Info, Minus, Plus, Calendar as CalendarIcon, ChevronUp, ChevronDown, Target, X, Loader2, BarChart3, ChevronLeft, ChevronRight, TrendingUp, TrendingDown, ChevronRight as ChevronRightIcon } from 'lucide-react';import { Slider } from '@/components/ui/slider';
 import { useToast } from './ui/use-toast';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Calendar } from './ui/calendar';
@@ -1703,6 +1701,10 @@ const RiseFallExecution = ({ selectedMarket, tradeType = 'rise_fall', aiPredicti
   );
 };
 
+// Module-level lock to prevent duplicate fetchProposals across ALL component instances
+// This solves React Strict Mode double-mounting issue in development
+let globalFetchLock = { pending: null, counter: 0 };
+
 const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPrediction, onBarrierChange, hidePrediction = false, onTradePlaced, openPositions, hideActionButtons = false, onProposalsSync }) => {
   // Subscribe to Redux trade type changes
   const reduxTradeType = useAppSelector(state => state.tradeType.currentTradeType);
@@ -1747,13 +1749,30 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
   const balance = selectedAccount?.balance ?? user?.balance ?? 0;
   // Get currency from selected account or user, default to USD
   const currency = selectedAccount?.currency || user?.currency || 'USD';
-  // Get current tick from tickData (more reliable than lastTick prop which might be stale)
-  const currentTick = selectedMarket?.symbol ? (tickData?.[selectedMarket.symbol] || lastTick) : lastTick;
+  
+  // OPTIMIZATION: Use refs for frequently changing values to avoid re-renders
+  const tickDataRef = useRef(tickData);
+  const lastTickRef = useRef(lastTick);
   const prevTradeTypeRef = useRef(null);
   const prevSymbolRef = useRef(null); // Track previous symbol to detect market changes
   const isMountedRef = useRef(false);
+  const isFetchingRef = useRef(false); // Track if a fetch is already in progress to prevent concurrent calls
+  const fetchStartTimeRef = useRef(0); // Track when last fetch started to prevent concurrent calls
+  const fetchCounterRef = useRef(0); // Atomic counter to absolutely prevent race conditions
+  const pendingFetchTimeoutRef = useRef(null); // Track pending setTimeout to prevent multiple scheduled calls
   // Track subscription IDs to manage subscriptions properly
   const subscriptionIdsRef = useRef(new Map()); // contractType -> subscription_id
+  
+  // Update refs when tick data changes (without triggering re-renders)
+  useEffect(() => {
+    tickDataRef.current = tickData;
+    lastTickRef.current = lastTick;
+  }, [tickData, lastTick]);
+  
+  // Get current tick from refs (prevents re-renders on every tick)
+  const getCurrentTick = useCallback(() => {
+    return selectedMarket?.symbol ? (tickDataRef.current?.[selectedMarket.symbol] || lastTickRef.current) : lastTickRef.current;
+  }, [selectedMarket?.symbol]);
   
   // Clear proposals and subscriptions when market symbol changes
   useEffect(() => {
@@ -1828,34 +1847,35 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
     };
   }, [tradeType, api, isConnected]);
   
-  // Report barrier to chart
-  useEffect(() => {
-    if (!onBarrierChange || !selectedMarket?.symbol) {
-      onBarrierChange?.([]);
-      return;
+  // Memoize barrier data calculation to avoid recalculating on every render
+  const barrierData = useMemo(() => {
+    if (!selectedMarket?.symbol || barrier === undefined || barrier === null) {
+      return [];
     }
     
-    // Always show barrier if we have a value (even 0.001)
-    if (barrier !== undefined && barrier !== null) {
-      // Calculate barrier price from current tick if available
-      const tick = currentTick || (selectedMarket?.symbol ? tickData?.[selectedMarket.symbol] : null);
-      let barrierPrice = null;
-      if (tick && tick.symbol === selectedMarket.symbol && tick.quote) {
-        barrierPrice = tick.quote + barrier;
-      }
-      
-      // Always report barrier, even if price not available yet (will be calculated in TradingChart)
-      onBarrierChange?.([{
-        price: barrierPrice,
-        barrierOffset: barrier, // Always include offset for calculation
-        label: `≡ +${barrier}`,
-        color: '#60A5FA', // Light blue color
-        lineStyle: 2, // dashed
-      }]);
-    } else {
-      onBarrierChange?.([]);
+    // Calculate barrier price from current tick if available
+    const tick = getCurrentTick();
+    let barrierPrice = null;
+    if (tick && tick.symbol === selectedMarket.symbol && tick.quote) {
+      barrierPrice = tick.quote + barrier;
     }
-  }, [barrier, selectedMarket?.symbol, currentTick, tickData, onBarrierChange]);
+    
+    return [{
+      price: barrierPrice,
+      barrierOffset: barrier,
+      label: `≡ +${barrier}`,
+      color: '#60A5FA',
+      lineStyle: 2,
+    }];
+  }, [barrier, selectedMarket?.symbol, getCurrentTick]);
+  
+  // Report barrier to chart (optimized with useMemo)
+  useEffect(() => {
+    if (!onBarrierChange) {
+      return;
+    }
+    onBarrierChange(barrierData);
+  }, [onBarrierChange, barrierData]);
 
   const fetchProposal = useCallback(async (contractType) => {
     const amount = stakeOrPayout === 'payout' ? payout : stake;
@@ -1918,8 +1938,8 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
     const needsAbsoluteBarrier = durationInHours >= 24;
     let formattedBarrier;
     
-    // Get current tick data (used for absolute barrier calculation and error logging)
-    const tick = currentTick || (selectedMarket?.symbol ? tickData?.[selectedMarket.symbol] : null);
+    // Get current tick data from ref (used for absolute barrier calculation and error logging)
+    const tick = getCurrentTick();
     
     console.log('[HigherLowerExecution] Barrier calculation:', {
       contractType,
@@ -1952,25 +1972,26 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           formattedBarrier
         });
       } else {
-        // Cannot calculate absolute barrier - use relative barrier as fallback
-        // This allows proposals to be fetched even when tick data isn't available yet
-        // The API will handle the conversion or return an error if relative barriers aren't supported
-        console.warn('[HigherLowerExecution] No tick data available for absolute barrier, using relative barrier as fallback', {
+        // CRITICAL: Cannot calculate absolute barrier without tick data
+        // API REQUIRES absolute barriers for 24h+ contracts - relative barriers will be REJECTED
+        // Return null to allow tick retry effect to wait for tick data
+        console.warn('[HigherLowerExecution] No tick data available for absolute barrier (24h+ contract), waiting for tick data', {
           contractType,
           durationInHours,
           barrier,
           hasTickData: !!tickData,
           tickDataKeys: tickData ? Object.keys(tickData) : [],
-          currentTick: currentTick ? 'exists' : 'not available',
+          hasTick: !!tick,
+          tickSymbol: tick?.symbol,
+          selectedSymbol: selectedMarket.symbol,
+          hasQuote: !!tick?.quote,
+          tickQuote: tick?.quote,
           lastTick: lastTick ? 'exists' : 'not available',
           selectedMarketSymbol: selectedMarket?.symbol
         });
-        // Use relative barrier as fallback - API may accept it or we'll retry when tick data arrives
-        formattedBarrier = barrier >= 0 ? `+${formatBarrierValue(barrier)}` : `${formatBarrierValue(barrier)}`;
-        console.log('[HigherLowerExecution] Using relative barrier fallback:', {
-          contractType,
-          formattedBarrier
-        });
+        // Don't send request with relative barrier - API will reject it
+        // Tick retry effect will handle retrying when tick data becomes available
+        return null;
       }
     } else {
       // Relative barrier for contracts < 24 hours
@@ -2005,7 +2026,26 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
     }
 
     try {
+      console.log('[TRACE] Sending API request:', {
+        timestamp: Date.now(),
+        contractType,
+        barrier: baseParams.barrier,
+        symbol: baseParams.symbol,
+        duration: baseParams.duration,
+        durationUnit: baseParams.duration_unit
+      });
+      
       const response = await api.send(baseParams);
+      
+      console.log('[TRACE] API response received:', {
+        timestamp: Date.now(),
+        contractType,
+        hasError: !!response.error,
+        hasProposal: !!response.proposal,
+        errorCode: response.error?.code,
+        proposalId: response.proposal?.id
+      });
+      
       if (response.error) {
         const errorCode = response.error.code;
         const errorMsg = response.error.message || 'Failed to get proposal';
@@ -2208,7 +2248,9 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
       }
       return null;
     }
-  }, [selectedMarket, stake, payout, stakeOrPayout, api, isConnected, user, barrier, durationOrEndtime, durationValue, durationUnit, endDate, toast, tradeType, currency, lastTick, tickData, currentTick]);
+  }, [selectedMarket, stake, payout, stakeOrPayout, api, isConnected, user, barrier, durationOrEndtime, durationValue, durationUnit, endDate, toast, tradeType, currency]);
+  // OPTIMIZATION: Removed lastTick, tickData, currentTick, getCurrentTick from dependencies since tick data is accessed via refs
+  // getCurrentTick is stable enough through selectedMarket dependency
 
   // Function to refresh proposals - can be called after successful trades
   const refreshProposals = useCallback(async (showLoading = false) => {
@@ -2253,6 +2295,16 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
   }, [selectedMarket?.symbol, subscribeTick, isConnected]);
 
   useEffect(() => {
+    // CRITICAL GUARD: Use global lock to prevent duplicate fetches across ALL component instances
+    // This solves React Strict Mode double-mounting and prevents race conditions
+    if (globalFetchLock.pending !== null) {
+      console.log('[TRACE] Skipping effect - global fetch already pending');
+      return;
+    }
+    
+    // Set global lock immediately to block other component instances
+    globalFetchLock.pending = 'PENDING';
+    
     // Use Redux trade type if available, otherwise use prop tradeType
     const effectiveTradeType = reduxTradeType || tradeType;
     const tradeTypeChanged = prevTradeTypeRef.current !== null && prevTradeTypeRef.current !== effectiveTradeType;
@@ -2260,15 +2312,85 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
     prevTradeTypeRef.current = effectiveTradeType;
     
     const fetchProposals = async () => {
+      const now = Date.now();
+      
+      // CRITICAL: Use atomic counter increment to absolutely prevent race conditions
+      // Increment BEFORE any checks - each call gets a unique counter value
+      const previousCounter = fetchCounterRef.current;
+      const myCallId = ++fetchCounterRef.current;
+      
+      console.log('[TRACE] fetchProposals called:', {
+        timestamp: now,
+        previousCounter,
+        myCallId,
+        isFetching: isFetchingRef.current,
+        timeSinceLastFetch: now - fetchStartTimeRef.current
+      });
+      
+      // If another call is fetching, exit immediately
+      if (isFetchingRef.current) {
+        console.log('[TRACE] fetchProposals blocked - already fetching:', {
+          timestamp: now,
+          myCallId,
+          isFetching: true
+        });
+        return;
+      }
+      
+      // Set flag IMMEDIATELY - only the first call to reach here proceeds
+      isFetchingRef.current = true;
+      
+      // Double-check: if we're not the first call, another call beat us
+      // This catches the edge case where two calls reach here simultaneously
+      if (myCallId !== fetchCounterRef.current) {
+        console.log('[TRACE] fetchProposals blocked - lost race:', {
+          timestamp: now,
+          myCallId,
+          currentCounter: fetchCounterRef.current
+        });
+        isFetchingRef.current = false;
+        return;
+      }
+      
+      // Check timestamp - prevent calls that are too close together
+      const MIN_FETCH_INTERVAL_MS = 50;
+      const timeSinceLastFetch = now - fetchStartTimeRef.current;
+      
+      if (fetchStartTimeRef.current > 0 && timeSinceLastFetch < MIN_FETCH_INTERVAL_MS) {
+        console.log('[TRACE] fetchProposals blocked - too soon:', {
+          timestamp: now,
+          myCallId,
+          lastFetchStart: fetchStartTimeRef.current,
+          timeSinceLastFetch,
+          minInterval: MIN_FETCH_INTERVAL_MS
+        });
+        isFetchingRef.current = false;
+        return;
+      }
+      
+      // Update timestamp now that we're committed to fetching
+      fetchStartTimeRef.current = now;
+      
+      console.log('[TRACE] fetchProposals proceeding:', {
+        timestamp: now,
+        myCallId,
+        hasSymbol: !!selectedMarket?.symbol,
+        hasApi: !!api,
+        isConnected,
+        hasTickData: !!getCurrentTick()?.quote
+      });
+      
       // Check prerequisites and provide helpful error messages
       if (!selectedMarket?.symbol) {
         console.warn('[HigherLowerExecution] Cannot fetch proposals: No market selected');
+        isFetchingRef.current = false; // Clear flag before early return
         // DON'T clear proposals - they might still be valid for previous market
         return;
       }
       
       if (!api) {
         console.warn('[HigherLowerExecution] Cannot fetch proposals: API not available');
+        isFetchingRef.current = false; // Clear flag before early return
         toast({
           title: 'Connection Error',
           description: 'API is not available. Please refresh the page or check your connection.',
@@ -2281,6 +2403,7 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
       
       if (!isConnected) {
         console.warn('[HigherLowerExecution] Cannot fetch proposals: WebSocket not connected');
+        isFetchingRef.current = false; // Clear flag before early return
         toast({
           title: 'Connection Error',
           description: 'WebSocket is not connected. The app will reconnect automatically. Please wait...',
@@ -2292,13 +2415,13 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
       }
       
       // Check if we're in rate limit cooldown period (5 seconds)
-      const now = Date.now();
       const timeSinceRateLimit = now - rateLimitCooldownRef.current;
       const RATE_LIMIT_COOLDOWN_MS = 5000; // 5 seconds cooldown after rate limit
       
       if (rateLimitCooldownRef.current > 0 && timeSinceRateLimit < RATE_LIMIT_COOLDOWN_MS) {
         const remainingCooldown = ((RATE_LIMIT_COOLDOWN_MS - timeSinceRateLimit) / 1000).toFixed(1);
         console.log(`[HigherLowerExecution] Waiting for rate limit cooldown: ${remainingCooldown}s remaining`);
+        isFetchingRef.current = false; // Clear flag before early return
         // Don't fetch proposals during cooldown - return early
         if (isMountedRef.current) {
           setIsLoading(false);
@@ -2330,10 +2453,43 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           currency // Log currency being used
         });
         
+        console.log('[TRACE] About to call fetchProposal for CALL:', {
+          timestamp: Date.now(),
+          contractType: callType,
+          hasTickData: !!getCurrentTick()?.quote,
+          tickQuote: getCurrentTick()?.quote
+        });
+        
         // Add a small delay between CALL and PUT requests to reduce rate limit issues
         const callRes = await fetchProposal(callType);
+        
+        console.log('[TRACE] CALL result:', {
+          timestamp: Date.now(),
+          hasResult: !!callRes,
+          resultId: callRes?.id
+        });
+        if (!callRes) {
+          console.warn('[HigherLowerExecution] CALL proposal returned null - check logs above for reason');
+        }
         await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay between requests
+        
+        console.log('[TRACE] About to call fetchProposal for PUT:', {
+          timestamp: Date.now(),
+          contractType: putType,
+          hasTickData: !!getCurrentTick()?.quote,
+          tickQuote: getCurrentTick()?.quote
+        });
+        
         const putRes = await fetchProposal(putType);
+        
+        console.log('[TRACE] PUT result:', {
+          timestamp: Date.now(),
+          hasResult: !!putRes,
+          resultId: putRes?.id
+        });
+        if (!putRes) {
+          console.warn('[HigherLowerExecution] PUT proposal returned null - check logs above for reason');
+        }
         
         console.log('[HigherLowerExecution] Proposal fetch results:', {
           callProposal: callRes ? {
@@ -2355,8 +2511,15 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
         });
         
         if (isMountedRef.current) {
-          setCallProposal(callRes);
-          setPutProposal(putRes);
+          // CRITICAL FIX: Only update proposals if we got valid results
+          // Don't overwrite existing valid proposals with null from failed fetches
+          // This prevents the race condition where one proposal succeeds but the other fails
+          if (callRes !== null) {
+            setCallProposal(callRes);
+          }
+          if (putRes !== null) {
+            setPutProposal(putRes);
+          }
           
           // Calculate if we need absolute barrier (for >= 24h contracts)
           let durationInHours = 0;
@@ -2376,7 +2539,7 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           }
           
           const needsAbsoluteBarrier = durationInHours >= 24;
-          const hasTickData = currentTick || (selectedMarket?.symbol ? tickData?.[selectedMarket.symbol] : null);
+          const hasTickData = getCurrentTick() || (selectedMarket?.symbol ? tickDataRef.current?.[selectedMarket.symbol] : null);
           
           // For >= 24h contracts, if we don't have tick data yet, we're still waiting
           // Don't show warning if we're waiting for tick data and haven't exhausted retries
@@ -2385,9 +2548,12 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           
           // Show warning if proposals are null AND we're not waiting for tick data
           // Reset warning flag when proposals are successfully fetched
-          // IMPORTANT: Check both fetch results AND current state to avoid stale warnings
-          const hasCallInState = !!callProposal;
-          const hasPutInState = !!putProposal;
+          // IMPORTANT: Determine final proposal state after updates
+          // If we got a new proposal from fetch, use it. Otherwise, keep existing state value.
+          const finalCallProposal = callRes !== null ? callRes : callProposal;
+          const finalPutProposal = putRes !== null ? putRes : putProposal;
+          const hasCallInState = !!finalCallProposal;
+          const hasPutInState = !!finalPutProposal;
           const hasCallFromFetch = !!callRes;
           const hasPutFromFetch = !!putRes;
           
@@ -2395,7 +2561,7 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
             warningShownForRetryCycleRef.current = false;
             console.log('[HigherLowerExecution] Both proposals successfully fetched');
           } else if ((!hasCallFromFetch || !hasPutFromFetch) && !isWaitingForTickData && !warningShownForRetryCycleRef.current) {
-            // Only show warning for proposals that are missing in BOTH fetch and state
+            // Only log warning for proposals that are missing in BOTH fetch and FINAL state
             const missingProposals = [];
             if (!hasCallFromFetch && !hasCallInState) {
               missingProposals.push('Higher (CALL)');
@@ -2404,10 +2570,8 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
               missingProposals.push('Lower (PUT)');
             }
             
-            // Only show warning if we actually have missing proposals (not available in state or fetch)
+            // Only log if we actually have missing proposals (not available in state or fetch)
             if (missingProposals.length > 0) {
-              warningShownForRetryCycleRef.current = true;
-              
               // Log detailed information about missing proposals
               console.warn('[HigherLowerExecution] Missing proposals:', {
                 missing: missingProposals,
@@ -2425,22 +2589,8 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
                 hasApi: !!api
               });
               
-              // Show more specific error message based on connection state
-              let errorDescription = `Could not fetch proposals for: ${missingProposals.join(', ')}.`;
-              if (!isConnected) {
-                errorDescription += ' WebSocket is not connected. Reconnecting...';
-              } else if (!api) {
-                errorDescription += ' API is not initialized. Please refresh the page.';
-              } else {
-                errorDescription += ' Please check your connection and ensure you are authorized.';
-              }
-              
-              toast({
-                title: 'Proposal Fetch Warning',
-                description: errorDescription,
-                variant: 'destructive',
-                duration: 5000
-              });
+              // NOTE: Toast warning is handled by tick retry effect after retries are exhausted
+              // Don't show toast here as state may not have been updated yet
             } else {
               // Proposals are available in state even if fetch failed - don't show warning
               console.log('[HigherLowerExecution] Proposals available in state, skipping warning');
@@ -2499,21 +2649,41 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           setPutProposal(null);
         }
       } finally {
+        isFetchingRef.current = false; // Clear fetch flag
         if (isMountedRef.current) {
           setIsLoading(false);
         }
       }
     };
 
-    // Always fetch on mount or trade type change
-    // Debounce to 800ms to prevent rate limit errors when duration changes
-    if (isInitialMount || tradeTypeChanged) {
-      fetchProposals();
-    } else {
-      const timeoutId = setTimeout(fetchProposals, 800);
-      return () => clearTimeout(timeoutId);
+    // Always debounce fetchProposals to prevent multiple rapid calls
+    // Use shorter timeout for initial mount/trade type change (100ms), longer for other changes (800ms)
+    const debounceDelay = (isInitialMount || tradeTypeChanged) ? 100 : 800;
+    
+    // Clear any pending timeout first to prevent multiple scheduled calls
+    if (globalFetchLock.pending && typeof globalFetchLock.pending !== 'string') {
+      clearTimeout(globalFetchLock.pending);
+      globalFetchLock.pending = null;
     }
-  }, [fetchProposal, allowEquals, stakeOrPayout, stake, payout, selectedMarket?.symbol, api, isConnected, tradeType, reduxTradeType, durationValue, durationUnit, durationOrEndtime, endDate, currentTick, tickData]);
+    
+    // Schedule new fetch and store timeout ID in global lock
+    const timeoutId = setTimeout(() => {
+      globalFetchLock.pending = null; // Clear global lock when timeout executes
+      fetchProposals();
+    }, debounceDelay);
+    
+    globalFetchLock.pending = timeoutId;
+    
+    // Cleanup function to cancel timeout if effect re-runs
+    return () => {
+      if (globalFetchLock.pending && typeof globalFetchLock.pending !== 'string') {
+        clearTimeout(globalFetchLock.pending);
+        globalFetchLock.pending = null;
+      }
+    };
+    // OPTIMIZATION: Removed currentTick and tickData from dependencies to prevent excessive re-fetching
+    // Tick data is accessed via refs inside fetchProposal, so we only refetch when trade parameters actually change
+  }, [fetchProposal, allowEquals, stakeOrPayout, stake, payout, selectedMarket?.symbol, api, isConnected, tradeType, reduxTradeType, durationValue, durationUnit, durationOrEndtime, endDate]);
 
   // Track retry attempts to prevent infinite loops
   const retryCountRef = useRef(0);
@@ -2574,11 +2744,30 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
   const warningShownForRetryCycleRef = useRef(false); // Track if warning was shown for current retry cycle
   const lastTickQuoteRef = useRef(null); // Track the last tick quote we used to fetch proposals
   const hasFetchedWithTickDataRef = useRef(false); // Track if we've successfully fetched proposals with tick data
+  const tickRetryTimeoutRef = useRef(null); // Track the timeout ID to prevent duplicate timeouts
   const MAX_TICK_RETRIES = 2;
   const TICK_RETRY_COOLDOWN_MS = 3000; // 3 seconds between tick retries
   
   // Retry fetching proposals when tick data becomes available (for >= 24h contracts that need absolute barrier)
   useEffect(() => {
+    console.log('[TRACE] Tick retry effect triggered:', {
+      timestamp: Date.now(),
+      hasApi: !!api,
+      isConnected,
+      hasSymbol: !!selectedMarket?.symbol,
+      isLoading,
+      hasCallProposal: !!callProposal,
+      hasPutProposal: !!putProposal,
+      isFetching: isFetchingRef.current,
+      hasTimeoutScheduled: !!tickRetryTimeoutRef.current
+    });
+    
+    // CRITICAL: Don't run if fetch is in progress or timeout is already scheduled
+    if (isFetchingRef.current || tickRetryTimeoutRef.current) {
+      console.log('[TRACE] Skipping tick retry - fetch in progress or timeout scheduled');
+      return;
+    }
+    
     if (!api || !isConnected || !selectedMarket?.symbol || isLoading) return;
     
     // Check if we need absolute barrier (duration >= 24h)
@@ -2599,7 +2788,7 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
     }
     
     const needsAbsoluteBarrier = durationInHours >= 24;
-    const tick = currentTick || (selectedMarket?.symbol ? tickData?.[selectedMarket.symbol] : null);
+    const tick = getCurrentTick();
     const hasTickData = tick && tick.quote;
     const currentTickQuote = hasTickData ? tick.quote : null;
     
@@ -2660,7 +2849,10 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
         console.log('[HigherLowerExecution] Tick data now available, retrying proposal fetch for >= 24h contract');
         waitingForTickDataRef.current = false; // No longer waiting
         lastTickQuoteRef.current = currentTickQuote; // Update before fetching to prevent duplicate retries
-        const timeoutId = setTimeout(() => {
+        
+        // Schedule timeout and store its ID
+        tickRetryTimeoutRef.current = setTimeout(() => {
+          tickRetryTimeoutRef.current = null; // Clear timeout ID
           if (api && isConnected && !isLoading) {
             tickRetryCountRef.current += 1;
             lastTickRetryTimeRef.current = Date.now();
@@ -2668,10 +2860,27 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           }
         }, 1000); // Increased delay to 1 second
         
-        return () => clearTimeout(timeoutId);
+        // Cleanup function to clear timeout
+        return () => {
+          if (tickRetryTimeoutRef.current) {
+            clearTimeout(tickRetryTimeoutRef.current);
+            tickRetryTimeoutRef.current = null;
+          }
+        };
       } else if (tickRetryCountRef.current >= MAX_TICK_RETRIES) {
         // Retries exhausted - no longer waiting
         waitingForTickDataRef.current = false;
+        
+        console.log('[TRACE] Tick retries exhausted, checking if warning should be shown:', {
+          timestamp: Date.now(),
+          tickRetryCount: tickRetryCountRef.current,
+          maxRetries: MAX_TICK_RETRIES,
+          hasCallProposal: !!callProposal,
+          hasPutProposal: !!putProposal,
+          warningAlreadyShown: warningShownForRetryCycleRef.current,
+          hasTickData: !!getCurrentTick()?.quote,
+          tickQuote: getCurrentTick()?.quote
+        });
         
         // Show warning now that retries are exhausted (only if BOTH proposals are missing and not already shown)
         const bothMissing = !callProposal && !putProposal;
@@ -2679,6 +2888,12 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           const missingProposals = [];
           if (!callProposal) missingProposals.push('Higher');
           if (!putProposal) missingProposals.push('Lower');
+          
+          console.log('[TRACE] SHOWING TOAST WARNING - tick retries exhausted:', {
+            timestamp: Date.now(),
+            missingProposals,
+            tickRetryCount: tickRetryCountRef.current
+          });
           
           warningShownForRetryCycleRef.current = true;
           toast({
@@ -2699,7 +2914,8 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
         return () => clearTimeout(resetTimeoutId);
       }
     }
-  }, [currentTick, tickData, callProposal, putProposal, api, isConnected, selectedMarket?.symbol, isLoading, durationOrEndtime, durationValue, durationUnit, endDate, refreshProposals]);
+    // OPTIMIZATION: Removed currentTick and tickData from dependencies - accessed via refs
+  }, [callProposal, putProposal, api, isConnected, selectedMarket?.symbol, isLoading, durationOrEndtime, durationValue, durationUnit, endDate, refreshProposals, getCurrentTick]);
 
   const handleStakeChange = (amount) => setStake(prev => Math.max(1, prev + amount));
   const handlePayoutChange = (amount) => setPayout(prev => Math.max(1, prev + amount));
@@ -3658,8 +3874,19 @@ const TouchNoTouchExecution = ({ selectedMarket, tradeType = 'touch_no_touch', a
   // This ensures we use the balance for the selected account, not the first account
   const selectedAccount = getSelectedAccountFromStorage();
   const balance = selectedAccount?.balance ?? user?.balance ?? 0;
-  // Get current tick from tickData (more reliable than lastTick prop which might be stale)
-  const currentTick = selectedMarket?.symbol ? (tickData?.[selectedMarket.symbol] || lastTick) : lastTick;
+  
+  // OPTIMIZATION: Use refs for frequently changing tick data
+  const tickDataRef = useRef(tickData);
+  const lastTickRef = useRef(lastTick);
+  useEffect(() => {
+    tickDataRef.current = tickData;
+    lastTickRef.current = lastTick;
+  }, [tickData, lastTick]);
+  
+  const getCurrentTick = useCallback(() => {
+    return selectedMarket?.symbol ? (tickDataRef.current?.[selectedMarket.symbol] || lastTickRef.current) : lastTickRef.current;
+  }, [selectedMarket?.symbol]);
+  
   const prevTradeTypeRef = useRef(null);
   const isMountedRef = useRef(false);
   
@@ -3702,7 +3929,7 @@ const TouchNoTouchExecution = ({ selectedMarket, tradeType = 'touch_no_touch', a
     // Always show barrier if we have a value (even 0.001)
     if (barrier !== undefined && barrier !== null) {
       // Calculate barrier price from current tick if available
-      const tick = currentTick || (selectedMarket?.symbol ? tickData?.[selectedMarket.symbol] : null);
+      const tick = getCurrentTick();
       let barrierPrice = null;
       if (tick && tick.symbol === selectedMarket.symbol && tick.quote) {
         barrierPrice = tick.quote + barrier;
@@ -3719,7 +3946,8 @@ const TouchNoTouchExecution = ({ selectedMarket, tradeType = 'touch_no_touch', a
     } else {
       onBarrierChange?.([]);
     }
-  }, [barrier, selectedMarket?.symbol, currentTick, tickData, onBarrierChange]);
+  }, [barrier, selectedMarket?.symbol, onBarrierChange, getCurrentTick]);
+  // OPTIMIZATION: Removed currentTick and tickData from dependencies
 
   const fetchProposal = useCallback(async (contractType) => {
     const amount = stakeOrPayout === 'payout' ? payout : stake;
@@ -3766,8 +3994,8 @@ const TouchNoTouchExecution = ({ selectedMarket, tradeType = 'touch_no_touch', a
     if (needsAbsoluteBarrier) {
       // Calculate absolute barrier price: current price + barrier offset
       // CRITICAL: For contracts >= 24h, we MUST have current price to calculate absolute barrier
-      // Try to get current price from tickData first, then fallback to lastTick
-      const tick = currentTick || (selectedMarket?.symbol ? tickData?.[selectedMarket.symbol] : null);
+      // Try to get current price from refs
+      const tick = getCurrentTick();
       
       if (tick && tick.symbol === selectedMarket.symbol && tick.quote) {
         const absoluteBarrierPrice = tick.quote + barrier;
@@ -3785,10 +4013,10 @@ const TouchNoTouchExecution = ({ selectedMarket, tradeType = 'touch_no_touch', a
           contractType,
           durationInHours,
           barrier,
-          hasTickData: !!tickData,
-          tickDataKeys: tickData ? Object.keys(tickData) : [],
-          currentTick: currentTick ? 'exists' : 'not available',
-          lastTick: lastTick ? 'exists' : 'not available',
+          hasTickData: !!tickDataRef.current,
+          tickDataKeys: tickDataRef.current ? Object.keys(tickDataRef.current) : [],
+          currentTick: getCurrentTick() ? 'exists' : 'not available',
+          lastTick: lastTickRef.current ? 'exists' : 'not available',
           selectedMarketSymbol: selectedMarket?.symbol
         });
         // Return null instead of using relative barrier - this will prevent the error
@@ -3884,7 +4112,8 @@ const TouchNoTouchExecution = ({ selectedMarket, tradeType = 'touch_no_touch', a
       }
       return null;
     }
-  }, [selectedMarket, stake, payout, stakeOrPayout, api, isConnected, barrier, durationOrEndtime, durationValue, durationUnit, endDate, toast, tradeType, getMinBarrierOffset, tickData, currentTick]);
+  }, [selectedMarket, stake, payout, stakeOrPayout, api, isConnected, barrier, durationOrEndtime, durationValue, durationUnit, endDate, toast, tradeType, getMinBarrierOffset, getCurrentTick]);
+  // OPTIMIZATION: Removed tickData and currentTick from dependencies - accessed via refs
 
   useEffect(() => {
     const tradeTypeChanged = prevTradeTypeRef.current !== null && prevTradeTypeRef.current !== tradeType;

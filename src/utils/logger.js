@@ -144,13 +144,13 @@ class ConsoleLogger {
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
     
-    console.log(`[Logger] Downloaded ${this.logs.length} logs to ${filename}`);
+    // Silent download - no console output for security
   }
 
   clear() {
     this.logs = [];
     this.startTime = Date.now();
-    console.log('[Logger] Logs cleared');
+    // Silent clear - no console output for security
   }
 
   // Filter logs by level
@@ -254,14 +254,7 @@ export default logger;
 
 // Initialize logger - called from main.jsx
 export const initLogger = () => {
-  console.log('[Logger] Console logging initialized. Use window.downloadLogs() to download logs.');
-  console.log('[Logger] Keyboard shortcut: Ctrl+Shift+L to download logs');
-  console.log('[Logger] Available functions:');
-  console.log('  - window.downloadLogs() - Download all logs as TXT');
-  console.log('  - window.downloadLogsJSON() - Download all logs as JSON');
-  console.log('  - window.downloadErrorLogs() - Download only errors');
-  console.log('  - window.downloadHigherLowerLogs() - Download Higher/Lower related logs');
-  console.log('  - window.downloadWebSocketLogs() - Download WebSocket related logs');
+  // Silent initialization - no console hints for security reasons
 };
 
 // Helper functions for easy access

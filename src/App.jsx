@@ -493,6 +493,9 @@ const AppContent = () => {
         // CRITICAL: Update Redux store for trade type change - triggers proposal fetching
         dispatch(setTradeTypeRedux(type));
         setIsMobileTradePanelOpen(true);
+        
+        // Auto-close the trade type selector panel after selection
+        setIsTradeTypeSelectorOpen(false);
     };
 
     const lastTick = selectedMarket ? tickData?.[selectedMarket.symbol] : null;
