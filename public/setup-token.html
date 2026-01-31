@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Deriv Token Setup</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 { color: #333; margin-top: 0; }
+        .success { 
+            background: #d4edda; 
+            color: #155724; 
+            padding: 15px; 
+            border-radius: 4px; 
+            margin: 20px 0;
+            border: 1px solid #c3e6cb;
+        }
+        .warning {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+            border: 1px solid #ffeaa7;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 10px 0;
+            box-sizing: border-box;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+            margin-right: 10px;
+        }
+        button:hover { background: #0056b3; }
+        button.danger { background: #dc3545; }
+        button.danger:hover { background: #c82333; }
+        button.success { background: #28a745; }
+        button.success:hover { background: #218838; }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Deriv API Token Setup</h1>
+        <div class="warning">
+            <strong>⚠️ Security Warning:</strong> This token provides access to your Deriv account. 
+            Never share it publicly or commit it to version control.
+        </div>
+        
+        <label for="tokenInput"><strong>API Token:</strong></label>
+        <input type="text" id="tokenInput" placeholder="Enter your Deriv API token" value="QgaNAF2nvKahmjt">
+        
+        <div id="status"></div>
+        
+        <button onclick="setToken()">Set Token</button>
+        <button class="danger" onclick="removeToken()">Remove Token</button>
+        <button class="success" onclick="window.location.href='/'">Go to App</button>
+    </div>
+
+    <script>
+        function setToken() {
+            const tokenInput = document.getElementById('tokenInput');
+            const token = tokenInput.value.trim();
+            
+            if (!token) {
+                document.getElementById('status').innerHTML = 
+                    '<div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 4px; margin: 20px 0;">❌ Please enter a token</div>';
+                return;
+            }
+            
+            try {
+                const userData = {
+                    token: token,
+                    loginid: null,
+                    currency: 'USD'
+                };
+                localStorage.setItem('deriv_user', JSON.stringify(userData));
+                document.getElementById('status').innerHTML = 
+                    '<div class="success"><strong>✅ Success!</strong> Token has been set. The app will authorize automatically when you navigate to it.</div>';
+            } catch (e) {
+                document.getElementById('status').innerHTML = 
+                    '<div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 4px; margin: 20px 0;">❌ Error: ' + e.message + '</div>';
+            }
+        }
+        
+        function removeToken() {
+            localStorage.removeItem('deriv_user');
+            localStorage.removeItem('deriv_all_accounts');
+            document.getElementById('status').innerHTML = 
+                '<div class="success"><strong>✅ Token Removed</strong> Token has been removed from localStorage.</div>';
+        }
+        
+        // Check if token is already set
+        window.onload = function() {
+            const stored = localStorage.getItem('deriv_user');
+            if (stored) {
+                try {
+                    const parsed = JSON.parse(stored);
+                    if (parsed.token) {
+                        document.getElementById('tokenInput').value = parsed.token;
+                        document.getElementById('status').innerHTML = 
+                            '<div class="warning">Token is already set. You can update it or remove it.</div>';
+                    }
+                } catch (e) {}
+            }
+        };
+    </script>
+</body>
+</html>
+
