@@ -2666,8 +2666,9 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
         // Retries exhausted - no longer waiting
         waitingForTickDataRef.current = false;
         
-        // Show warning now that retries are exhausted (only if not already shown)
-        if ((!callProposal || !putProposal) && !warningShownForRetryCycleRef.current) {
+        // Show warning now that retries are exhausted (only if BOTH proposals are missing and not already shown)
+        const bothMissing = !callProposal && !putProposal;
+        if (bothMissing && !warningShownForRetryCycleRef.current) {
           const missingProposals = [];
           if (!callProposal) missingProposals.push('Higher');
           if (!putProposal) missingProposals.push('Lower');
