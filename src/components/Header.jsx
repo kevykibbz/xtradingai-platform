@@ -102,7 +102,7 @@ export default function Header({ onLogin, onSignup, aiPrediction, top5Methods = 
       localStorage.setItem('deriv_all_accounts', JSON.stringify(deepAccounts));
       const primary = deepAccounts[0];
       localStorage.setItem('deriv_user', JSON.stringify(primary));
-      initConnection(primary);
+      // initConnection(primary); // Disabled - DerivContext handles WebSocket
       window.history.replaceState({}, '', '/');
       return;
     }
@@ -115,8 +115,15 @@ export default function Header({ onLogin, onSignup, aiPrediction, top5Methods = 
 
     const saved = localStorage.getItem('deriv_user');
     if (saved) {
-      try { initConnection(JSON.parse(saved)); }
-      catch { localStorage.removeItem('deriv_user'); }
+      // Disabled - DerivContext handles WebSocket
+      // try { initConnection(JSON.parse(saved)); }
+      // catch { localStorage.removeItem('deriv_user'); }
+      try {
+        const parsed = JSON.parse(saved);
+        setUser(parsed);
+      } catch {
+        localStorage.removeItem('deriv_user');
+      }
     }
   }, []);
 
@@ -131,7 +138,8 @@ export default function Header({ onLogin, onSignup, aiPrediction, top5Methods = 
           currency: data.authorize.currency || 'USD',
         };
         localStorage.setItem('deriv_user', JSON.stringify(u));
-        initConnection(u);
+        setUser(u); // Set user state instead of init connection
+        // initConnection(u); // Disabled - DerivContext handles WebSocket
         window.history.replaceState({}, '', '/');
       }
     } catch (e) {}

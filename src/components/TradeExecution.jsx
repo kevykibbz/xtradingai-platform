@@ -1750,9 +1750,33 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
   // Get current tick from tickData (more reliable than lastTick prop which might be stale)
   const currentTick = selectedMarket?.symbol ? (tickData?.[selectedMarket.symbol] || lastTick) : lastTick;
   const prevTradeTypeRef = useRef(null);
+  const prevSymbolRef = useRef(null); // Track previous symbol to detect market changes
   const isMountedRef = useRef(false);
   // Track subscription IDs to manage subscriptions properly
   const subscriptionIdsRef = useRef(new Map()); // contractType -> subscription_id
+  
+  // Clear proposals and subscriptions when market symbol changes
+  useEffect(() => {
+    const currentSymbol = selectedMarket?.symbol;
+    const symbolChanged = prevSymbolRef.current !== null && prevSymbolRef.current !== currentSymbol;
+    prevSymbolRef.current = currentSymbol;
+    
+    // Only clear proposals if symbol actually changed (not on mount or other re-renders)
+    if (symbolChanged) {
+      console.log('[HigherLowerExecution] Market symbol changed, clearing proposals:', {
+        from: prevSymbolRef.current,
+        to: currentSymbol
+      });
+      setCallProposal(null);
+      setPutProposal(null);
+      // Reset retry tracking when symbol changes
+      tickRetryCountRef.current = 0;
+      warningShownForRetryCycleRef.current = false;
+      waitingForTickDataRef.current = false;
+      lastTickQuoteRef.current = null;
+      hasFetchedWithTickDataRef.current = false;
+    }
+  }, [selectedMarket?.symbol]);
   
   // Clear proposals and subscriptions immediately when tradeType changes to ensure fresh fetch
   useEffect(() => {
@@ -2215,20 +2239,11 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
       rateLimitCooldownRef.current = 0;
     }
     
-    try {
-        // CRITICAL FIX: Use correct contract types for Higher/Lower
-        // Higher/Lower uses barrier-based contracts, not the same as Rise/Fall (CALL/PUT)
-        errorMessage.includes('rate limit') ||
-        errorMessage.includes('RateLimit');
-      if (!isExpectedError) {
-      } else {
-      }
-    } finally {
-      if (showLoading && isMountedRef.current) {
-        setIsLoading(false);
-      }
+    // Trigger re-fetch by updating state
+    if (isMountedRef.current) {
+      setIsLoading(false);
     }
-  }, [fetchProposal, allowEquals, selectedMarket?.symbol, api, isConnected]);
+  }, [api, isConnected, selectedMarket]);
 
   // Subscribe to tick data when market is selected (needed for >= 24h contracts that require absolute barriers)
   useEffect(() => {
@@ -2248,10 +2263,7 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
       // Check prerequisites and provide helpful error messages
       if (!selectedMarket?.symbol) {
         console.warn('[HigherLowerExecution] Cannot fetch proposals: No market selected');
-        if (isMountedRef.current) {
-          setCallProposal(null);
-          setPutProposal(null);
-        }
+        // DON'T clear proposals - they might still be valid for previous market
         return;
       }
       
@@ -2263,10 +2275,7 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           variant: 'destructive',
           duration: 5000
         });
-        if (isMountedRef.current) {
-          setCallProposal(null);
-          setPutProposal(null);
-        }
+        // DON'T clear proposals - they might recover on reconnect
         return;
       }
       
@@ -2278,10 +2287,7 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           variant: 'destructive',
           duration: 5000
         });
-        if (isMountedRef.current) {
-          setCallProposal(null);
-          setPutProposal(null);
-        }
+        // DON'T clear proposals - they might recover on reconnect
         return;
       }
       
@@ -2486,8 +2492,9 @@ const HigherLowerExecution = ({ selectedMarket, tradeType = 'higher_lower', aiPr
           });
         }
         
-        // Clear proposals on error to ensure buttons are properly disabled
-        if (isMountedRef.current) {
+        // Only clear proposals on genuine errors (not rate limit or connection issues that might recover)
+        // This prevents clearing valid proposals when there's a temporary network issue
+        if (!isExpectedError && isMountedRef.current) {
           setCallProposal(null);
           setPutProposal(null);
         }

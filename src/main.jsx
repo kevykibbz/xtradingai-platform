@@ -6,7 +6,11 @@ import { ReduxProvider } from '@/store/ReduxProvider';
 import { Toaster } from '@/components/ui/toaster';
 import App from './App.jsx';
 import OAuthCallback from './routes/OAuthCallback.jsx';
+import { initLogger } from '@/utils/logger';
 import './index.css';
+
+// Initialize console logging to file
+initLogger();
 
 // Global error handler for webview - catch network errors and show splash instead
 window.addEventListener('error', (event) => {
